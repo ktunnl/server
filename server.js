@@ -5,17 +5,22 @@ import Debug from 'debug';
 import http from 'http';
 import { hri } from 'human-readable-ids';
 import Router from 'koa-router';
+import axios from 'axios';
+import session from 'koa-session';
+
 
 import ClientManager from './lib/ClientManager';
 
 const debug = Debug('localtunnel:server');
 
-export default function(opt) {
+export default function (opt) {
     opt = opt || {};
 
     const validHosts = (opt.domain) ? [opt.domain] : undefined;
+
+    const authserver = opt.authserver || 'https://ktun.nl/auth/introspect'
     const myTldjs = tldjs.fromUserSettings({ validHosts });
-    const landingPage = opt.landing || 'https://localtunnel.github.io/www/';
+    const landingPage = opt.landing || 'https://ktun.nl';
 
     function GetClientIdFromHostname(hostname) {
         return myTldjs.getSubdomain(hostname);
@@ -28,6 +33,8 @@ export default function(opt) {
     const app = new Koa();
     const router = new Router();
 
+    app.use(session({signed: false}, app));
+    
     router.get('/api/status', async (ctx, next) => {
         const stats = manager.stats;
         ctx.body = {
@@ -50,11 +57,13 @@ export default function(opt) {
         };
     });
 
+    app.use(validatebearer);
+    
     app.use(router.routes());
     app.use(router.allowedMethods());
-
     // root endpoint
-    app.use(async (ctx, next) => {
+
+     app.use(async (ctx, next) => {
         const path = ctx.request.path;
 
         // skip anything not on the root path
@@ -65,7 +74,8 @@ export default function(opt) {
 
         const isNewClientRequest = ctx.query['new'] !== undefined;
         if (isNewClientRequest) {
-            const reqId = hri.random();
+            // const reqId = hri.random();
+            const reqId = ctx.session.username;
             debug('making new client with id %s', reqId);
             const info = await manager.newClient(reqId);
 
@@ -164,5 +174,52 @@ export default function(opt) {
         client.handleUpgrade(req, socket);
     });
 
+    async function validatebearer(ctx, next) {
+        if (ctx.session.username) {
+            await next;
+            return;
+        }
+    
+        let token = null;
+        
+        if (ctx.headers && ctx.headers.authorization) {
+            var parts = ctx.headers.authorization.split(' ');
+            if (parts.length == 2) {
+                var scheme = parts[0]
+                    , credentials = parts[1];
+                if (/^Bearer$/i.test(scheme)) {
+                    token = credentials;
+                }
+            }
+        }
+    
+        if (!token) {
+            ctx.throw(401);
+            return;
+        }
+    
+        let username = null;
+        try {
+            let resp = await axios.get(authserver+"?bearer=" + token);
+            if (!resp.data.username) {
+                ctx.body = "Unauthorized"
+                ctx.status = 401;
+                return;
+            } 
+            ctx.session.username = resp.data.username;
+            await next();
+            return;
+        } catch (error) {
+            console.log("cannot contact authorization server", error);
+            ctx.throw(500, "authorization server down");
+            return;
+        }
+        
+    
+    }
+    
+
     return server;
 };
+
+
